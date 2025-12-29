@@ -408,7 +408,7 @@ async def monitor_network_connections() -> str:
                 try:
                     proc = psutil.Process(conn.pid)
                     conn_data["process"] = proc.name()
-                except:
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     conn_data["process"] = "unknown"
 
             connections.append(conn_data)
@@ -434,7 +434,7 @@ async def monitor_network_connections() -> str:
                 conn_data["reasons"] = reasons
                 suspicious.append(conn_data)
 
-        except:
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
             continue
 
     # Summarize by status
@@ -480,11 +480,11 @@ async def check_listening_ports() -> str:
                         proc = psutil.Process(conn.pid)
                         listener["process"] = proc.name()
                         listener["user"] = proc.username()
-                    except:
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                         pass
 
                 listeners.append(listener)
-            except:
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
                 continue
 
     # Sort by port
@@ -534,7 +534,7 @@ async def check_file_integrity(
         try:
             with open(baseline_path, 'r') as f:
                 baseline = json.load(f)
-        except:
+        except (json.JSONDecodeError, IOError, OSError):
             pass
 
     for filepath in files_to_check:
