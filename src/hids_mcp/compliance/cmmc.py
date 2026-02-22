@@ -22,6 +22,7 @@ CMMC Model v2.0 aligned with NIST SP 800-171 Rev 2
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
@@ -54,6 +55,7 @@ class PracticeStatus(Enum):
     PARTIALLY_MET = "partially_met"
     NOT_MET = "not_met"
     NOT_APPLICABLE = "not_applicable"
+    NOT_ASSESSED = "not_assessed"
 
 
 @dataclass
@@ -598,6 +600,114 @@ for _practice in PRACTICE_MAPPINGS:
     _DOMAIN_INDEX[_domain_key].append(_practice)
 
 
+def _check_cmmc_capability_available(capability: str) -> PracticeStatus:
+    """
+    Check whether an HIDS capability is actually available on this system.
+
+    Args:
+        capability: Comma-separated HIDS capability string from a practice mapping.
+
+    Returns:
+        Dynamic PracticeStatus based on actual system state.
+    """
+    capabilities = [c.strip() for c in capability.split(",")]
+    results = []
+
+    for cap in capabilities:
+        if cap in ("analyze_auth_logs", "detect_brute_force"):
+            auth_logs = ["/var/log/auth.log", "/var/log/secure", "/var/log/messages"]
+            found = any(os.path.isfile(p) and os.access(p, os.R_OK) for p in auth_logs)
+            results.append(found)
+
+        elif cap == "audit_trail":
+            try:
+                from hids_mcp.compliance.audit_trail import get_default_trail
+                trail = get_default_trail()
+                results.append(trail is not None)
+            except Exception:
+                results.append(False)
+
+        elif cap == "check_file_integrity":
+            critical = ["/etc/passwd", "/etc/shadow", "/etc/group", "/etc/sudoers"]
+            found = any(os.path.isfile(p) for p in critical)
+            results.append(found)
+
+        elif cap == "check_suspicious_processes":
+            try:
+                import psutil
+                psutil.process_iter()
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        elif cap in ("monitor_network_connections", "check_listening_ports"):
+            try:
+                import psutil
+                psutil.net_connections(kind='inet')
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        elif cap in ("generate_security_report", "sbom_generation", "stig_checker"):
+            try:
+                if cap == "sbom_generation":
+                    from importlib.metadata import distributions
+                    list(distributions())[:1]
+                elif cap == "stig_checker":
+                    from hids_mcp.compliance.stig_checker import get_stig_summary
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        else:
+            return PracticeStatus.NOT_ASSESSED
+
+    if not results:
+        return PracticeStatus.NOT_ASSESSED
+
+    if all(results):
+        return PracticeStatus.MET
+    elif any(results):
+        return PracticeStatus.PARTIALLY_MET
+    else:
+        return PracticeStatus.NOT_ASSESSED
+
+
+def _assess_practice_dynamically(practice: CMMCPractice) -> PracticeStatus:
+    """
+    Determine the actual practice status by checking whether the underlying
+    HIDS capability is available and functional on this system.
+
+    The static status is the maximum possible. Dynamic checks can only
+    downgrade it.
+
+    Args:
+        practice: The practice mapping to assess.
+
+    Returns:
+        Dynamically determined PracticeStatus.
+    """
+    static_status = practice.status
+
+    if static_status in (PracticeStatus.NOT_APPLICABLE, PracticeStatus.NOT_MET):
+        return static_status
+
+    dynamic_status = _check_cmmc_capability_available(practice.hids_capability)
+
+    status_rank = {
+        PracticeStatus.MET: 4,
+        PracticeStatus.PARTIALLY_MET: 3,
+        PracticeStatus.NOT_MET: 2,
+        PracticeStatus.NOT_ASSESSED: 1,
+        PracticeStatus.NOT_APPLICABLE: 0,
+    }
+
+    if status_rank.get(dynamic_status, 0) < status_rank.get(static_status, 0):
+        return dynamic_status
+
+    return static_status
+
+
 def get_practice_by_id(practice_id: str) -> Optional[CMMCPractice]:
     """
     Retrieve a specific CMMC practice mapping by ID.
@@ -642,11 +752,17 @@ def assess_cmmc_posture() -> dict:
     """
     report_time = datetime.now(timezone.utc).isoformat()
 
+    # Dynamically assess each practice against actual system state
+    assessed_statuses: dict[str, PracticeStatus] = {}
+    for p in PRACTICE_MAPPINGS:
+        assessed_statuses[p.practice_id] = _assess_practice_dynamically(p)
+
     total_practices = len(PRACTICE_MAPPINGS)
-    met = [p for p in PRACTICE_MAPPINGS if p.status == PracticeStatus.MET]
-    partial = [p for p in PRACTICE_MAPPINGS if p.status == PracticeStatus.PARTIALLY_MET]
-    not_met = [p for p in PRACTICE_MAPPINGS if p.status == PracticeStatus.NOT_MET]
-    not_applicable = [p for p in PRACTICE_MAPPINGS if p.status == PracticeStatus.NOT_APPLICABLE]
+    met = [p for p in PRACTICE_MAPPINGS if assessed_statuses[p.practice_id] == PracticeStatus.MET]
+    partial = [p for p in PRACTICE_MAPPINGS if assessed_statuses[p.practice_id] == PracticeStatus.PARTIALLY_MET]
+    not_met = [p for p in PRACTICE_MAPPINGS if assessed_statuses[p.practice_id] == PracticeStatus.NOT_MET]
+    not_applicable = [p for p in PRACTICE_MAPPINGS if assessed_statuses[p.practice_id] == PracticeStatus.NOT_APPLICABLE]
+    not_assessed = [p for p in PRACTICE_MAPPINGS if assessed_statuses[p.practice_id] == PracticeStatus.NOT_ASSESSED]
 
     applicable = total_practices - len(not_applicable)
     if applicable > 0:
@@ -657,22 +773,31 @@ def assess_cmmc_posture() -> dict:
     # Per-domain breakdown
     domain_breakdown = {}
     for domain_code, practices in _DOMAIN_INDEX.items():
-        domain_met = [p for p in practices if p.status == PracticeStatus.MET]
-        domain_partial = [p for p in practices if p.status == PracticeStatus.PARTIALLY_MET]
+        domain_met = [p for p in practices if assessed_statuses[p.practice_id] == PracticeStatus.MET]
+        domain_partial = [p for p in practices if assessed_statuses[p.practice_id] == PracticeStatus.PARTIALLY_MET]
+        domain_not_assessed = [p for p in practices if assessed_statuses[p.practice_id] == PracticeStatus.NOT_ASSESSED]
         domain_total = len(practices)
+
+        # Build practice dicts with dynamic status override
+        practice_dicts = []
+        for p in practices:
+            d = p.to_dict()
+            d["assessed_status"] = assessed_statuses[p.practice_id].value
+            practice_dicts.append(d)
 
         domain_breakdown[domain_code] = {
             "domain_name": CMMCDomain[domain_code].value,
             "total_practices": domain_total,
             "met": len(domain_met),
             "partially_met": len(domain_partial),
-            "not_met": len([p for p in practices if p.status == PracticeStatus.NOT_MET]),
+            "not_met": len([p for p in practices if assessed_statuses[p.practice_id] == PracticeStatus.NOT_MET]),
+            "not_assessed": len(domain_not_assessed),
             "readiness_percentage": round(
                 ((len(domain_met) + 0.5 * len(domain_partial)) / domain_total * 100)
                 if domain_total > 0 else 0.0,
                 1,
             ),
-            "practices": [p.to_dict() for p in practices],
+            "practices": practice_dicts,
         }
 
     # Evidence artifact inventory
@@ -691,7 +816,7 @@ def assess_cmmc_posture() -> dict:
         nist_crossref[practice.practice_id] = {
             "nist_800_171_ref": practice.nist_800_171_ref,
             "practice_name": practice.practice_name,
-            "status": practice.status.value,
+            "status": assessed_statuses[practice.practice_id].value,
         }
 
     # Report integrity hash
@@ -717,7 +842,9 @@ def assess_cmmc_posture() -> dict:
             "partially_met": len(partial),
             "not_met": len(not_met),
             "not_applicable": len(not_applicable),
-            "level_2_achievable": len(not_met) == 0 and readiness_score >= 0.8,
+            "not_assessed": len(not_assessed),
+            "dynamically_verified": True,
+            "level_2_achievable": len(not_met) == 0 and len(not_assessed) == 0 and readiness_score >= 0.8,
         },
         "domain_breakdown": domain_breakdown,
         "nist_800_171_crossref": nist_crossref,
@@ -747,6 +874,18 @@ def assess_cmmc_posture() -> dict:
                     "hids_capability": p.hids_capability,
                 }
                 for p in not_met
+            ],
+            "not_assessed_practices": [
+                {
+                    "practice_id": p.practice_id,
+                    "practice_name": p.practice_name,
+                    "domain": p.domain.value,
+                    "nist_ref": p.nist_800_171_ref,
+                    "reason": "Capability could not be dynamically verified on this system",
+                    "hids_capability": p.hids_capability,
+                    "static_status": p.status.value,
+                }
+                for p in not_assessed
             ],
         },
         "assessment_summary": {

@@ -151,15 +151,42 @@ def _get_packages_via_pip() -> list[dict]:
     return packages
 
 
-def _compute_package_hash(name: str, version: str) -> str:
+def _compute_package_identifier(name: str, version: str) -> str:
     """
-    Compute a SHA-256 hash identifier for a package name+version.
+    Compute a SHA-256 identifier hash for a package name+version pair.
 
-    This is a content-addressable identifier, not a file hash.
-    For actual file hashes, the package's dist-info RECORD file is used.
+    NOTE: This is a version-based identifier hash for deduplication and
+    tracking purposes -- it hashes the string "name==version", NOT the
+    actual installed package files. It serves as a stable, reproducible
+    identifier for a specific package release, not as a file integrity
+    check. For file-level integrity, use the dist-info RECORD file or
+    _try_compute_file_hash().
     """
     content = f"{name}=={version}".encode("utf-8")
     return hashlib.sha256(content).hexdigest()
+
+
+def _try_compute_file_hash(name: str) -> Optional[str]:
+    """
+    Attempt to compute a real SHA-256 file hash for an installed package
+    by locating its top-level module via importlib.
+
+    Returns:
+        SHA-256 hex digest of the package's __init__.py or main module file,
+        or None if the file cannot be located.
+    """
+    try:
+        from importlib.metadata import distribution
+        dist = distribution(name)
+        # Try to find the top-level package file via the dist files list
+        if dist.files:
+            for f in dist.files:
+                fpath = f.locate()
+                if fpath and fpath.exists() and fpath.suffix == '.py':
+                    return hashlib.sha256(fpath.read_bytes()).hexdigest()
+    except Exception:
+        pass
+    return None
 
 
 def _normalize_license(license_str: str) -> tuple[str, str]:
@@ -327,7 +354,12 @@ def generate_sbom(include_transitive: bool = True) -> dict:
                 continue
 
         spdx_id, license_name = _normalize_license(pkg.get("license", ""))
-        pkg_hash = _compute_package_hash(pkg_name, pkg_version)
+        pkg_identifier = _compute_package_identifier(pkg_name, pkg_version)
+        # Use real file hash if available, fall back to version-based identifier
+        file_hash = _try_compute_file_hash(pkg_name)
+        hashes = {"SHA-256": file_hash or pkg_identifier}
+        if file_hash:
+            hashes["SHA-256-identifier"] = pkg_identifier
 
         component = SBOMComponent(
             name=pkg_name,
@@ -338,7 +370,7 @@ def generate_sbom(include_transitive: bool = True) -> dict:
             license_id=spdx_id,
             license_name=license_name if not spdx_id else "",
             description=pkg.get("summary", ""),
-            hashes={"SHA-256": pkg_hash},
+            hashes=hashes,
             external_references=(
                 [{"type": "website", "url": pkg["home_page"]}]
                 if pkg.get("home_page") else []

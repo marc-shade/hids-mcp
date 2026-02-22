@@ -558,12 +558,70 @@ _default_trail: Optional[AuditTrail] = None
 _trail_lock = threading.Lock()
 
 
+_DEFAULT_AUDIT_PATH = "/var/log/hids-mcp/audit.jsonl"
+
+
+def _resolve_storage_path(storage_path: Optional[str] = None) -> Optional[str]:
+    """
+    Determine the audit trail storage path.
+
+    Priority:
+    1. Explicit storage_path argument
+    2. HIDS_AUDIT_LOG environment variable
+    3. Default: /var/log/hids-mcp/audit.jsonl (if writable)
+    4. Fallback: ~/.hids-mcp/audit.jsonl (user-level)
+    5. None (in-memory only, with warning)
+    """
+    if storage_path:
+        return storage_path
+
+    env_path = os.environ.get("HIDS_AUDIT_LOG")
+    if env_path:
+        return env_path
+
+    # Try system-level default
+    default_dir = os.path.dirname(_DEFAULT_AUDIT_PATH)
+    try:
+        os.makedirs(default_dir, exist_ok=True)
+        # Test writability
+        test_file = os.path.join(default_dir, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("")
+        os.unlink(test_file)
+        return _DEFAULT_AUDIT_PATH
+    except (OSError, PermissionError):
+        pass
+
+    # Fallback to user-level path
+    user_dir = os.path.join(os.path.expanduser("~"), ".hids-mcp")
+    try:
+        os.makedirs(user_dir, exist_ok=True)
+        user_path = os.path.join(user_dir, "audit.jsonl")
+        return user_path
+    except (OSError, PermissionError):
+        pass
+
+    logger.warning(
+        "No writable audit storage path found. Audit trail will be in-memory only. "
+        "Set HIDS_AUDIT_LOG environment variable to configure persistent storage."
+    )
+    return None
+
+
 def get_default_trail(storage_path: Optional[str] = None) -> AuditTrail:
     """
     Get or create the default audit trail instance.
 
+    Uses persistent storage by default. The storage path is resolved in
+    this order:
+    1. Explicit storage_path argument
+    2. HIDS_AUDIT_LOG environment variable
+    3. /var/log/hids-mcp/audit.jsonl (system-level, if writable)
+    4. ~/.hids-mcp/audit.jsonl (user-level fallback)
+    5. In-memory only (last resort, with warning)
+
     Args:
-        storage_path: Optional path for persistent storage.
+        storage_path: Optional explicit path for persistent storage.
 
     Returns:
         The shared AuditTrail instance.
@@ -571,5 +629,6 @@ def get_default_trail(storage_path: Optional[str] = None) -> AuditTrail:
     global _default_trail
     with _trail_lock:
         if _default_trail is None:
-            _default_trail = AuditTrail(storage_path=storage_path)
+            resolved_path = _resolve_storage_path(storage_path)
+            _default_trail = AuditTrail(storage_path=resolved_path)
         return _default_trail

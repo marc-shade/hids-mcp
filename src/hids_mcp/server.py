@@ -265,11 +265,35 @@ async def analyze_auth_logs(
     }, indent=2)
 
 
+def _parse_syslog_timestamp(line: str) -> Optional[datetime]:
+    """
+    Parse syslog timestamp from the beginning of a log line.
+    Handles standard syslog format: 'Mon DD HH:MM:SS' (assumes current year).
+
+    Returns:
+        datetime if parseable, None otherwise.
+    """
+    try:
+        parts = line.split()
+        if len(parts) < 3:
+            return None
+        timestamp_str = f"{parts[0]} {parts[1]} {parts[2]}"
+        # Syslog timestamps lack year; assume current year
+        current_year = datetime.now().year
+        parsed = datetime.strptime(f"{current_year} {timestamp_str}", "%Y %b %d %H:%M:%S")
+        # Handle year rollover: if parsed is in the future, it's from last year
+        if parsed > datetime.now():
+            parsed = parsed.replace(year=current_year - 1)
+        return parsed
+    except (ValueError, IndexError):
+        return None
+
+
 @mcp.tool()
 async def detect_brute_force(
     log_path: Optional[str] = None,
     threshold: int = 5,
-    window_minutes: int = 10
+    window_minutes: Optional[int] = None
 ) -> str:
     """
     Detect brute force login attempts.
@@ -277,7 +301,9 @@ async def detect_brute_force(
     Args:
         log_path: Path to auth log
         threshold: Failures to trigger alert
-        window_minutes: Time window for detection
+        window_minutes: Time window in minutes - only failures within this
+                       recent window are counted toward the threshold.
+                       If None, all log entries are analyzed.
 
     Returns:
         JSON with brute force detection results
@@ -288,6 +314,9 @@ async def detect_brute_force(
             return json.dumps({"success": False, "error": "No auth log found"})
 
     ip_attempts = defaultdict(list)
+    window_cutoff = None
+    if window_minutes is not None:
+        window_cutoff = datetime.now() - timedelta(minutes=window_minutes)
 
     try:
         with open(log_path, 'r', errors='ignore') as f:
@@ -297,9 +326,13 @@ async def detect_brute_force(
                     match = AUTH_PATTERNS["invalid_user"].search(line)
                 if match:
                     user, ip = match.groups()
+                    timestamp = _parse_syslog_timestamp(line)
+                    # Filter by window_minutes when specified
+                    if window_cutoff is not None and timestamp is not None and timestamp < window_cutoff:
+                        continue
                     ip_attempts[ip].append({
                         "user": user,
-                        "time": datetime.now().isoformat()  # Approximate
+                        "time": timestamp.isoformat() if timestamp else datetime.now().isoformat(),
                     })
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
@@ -318,7 +351,7 @@ async def detect_brute_force(
 
     attackers.sort(key=lambda x: x["total_attempts"], reverse=True)
 
-    return json.dumps({
+    result = {
         "success": True,
         "attack_detected": len(attackers) > 0,
         "threshold": threshold,
@@ -330,7 +363,12 @@ async def detect_brute_force(
             "Consider geo-blocking if attacks from specific regions",
             "Review SSH configuration (disable password auth if possible)"
         ] if attackers else ["No brute force detected"]
-    }, indent=2)
+    }
+    if window_minutes is not None:
+        result["window_minutes"] = window_minutes
+        result["window_start"] = window_cutoff.isoformat()
+
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()

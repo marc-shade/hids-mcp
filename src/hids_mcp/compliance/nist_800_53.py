@@ -18,6 +18,8 @@ Reference: https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final
 import hashlib
 import json
 import logging
+import os
+import shutil
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
@@ -44,6 +46,7 @@ class ImplementationStatus(Enum):
     PARTIALLY_IMPLEMENTED = "partially_implemented"
     PLANNED = "planned"
     NOT_APPLICABLE = "not_applicable"
+    NOT_ASSESSED = "not_assessed"
 
 
 @dataclass
@@ -481,6 +484,141 @@ _ALERT_CONTROL_MAP: dict[str, list[str]] = {
 }
 
 
+def _check_capability_available(capability: str) -> ImplementationStatus:
+    """
+    Check whether an HIDS capability is actually available on this system
+    by probing real system state.
+
+    Capabilities that depend on log files are checked for file existence.
+    Capabilities that depend on runtime modules are checked for importability.
+    Capabilities that cannot be verified dynamically return NOT_ASSESSED.
+
+    Args:
+        capability: Comma-separated HIDS capability string from a control mapping.
+
+    Returns:
+        Dynamic ImplementationStatus based on actual system state.
+    """
+    capabilities = [c.strip() for c in capability.split(",")]
+    results = []
+
+    for cap in capabilities:
+        if cap in ("analyze_auth_logs", "detect_brute_force"):
+            # Check if any auth log exists and is readable
+            auth_logs = ["/var/log/auth.log", "/var/log/secure", "/var/log/messages"]
+            found = any(os.path.isfile(p) and os.access(p, os.R_OK) for p in auth_logs)
+            results.append(found)
+
+        elif cap == "audit_trail":
+            # Check if the audit trail module is importable and functional
+            try:
+                from hids_mcp.compliance.audit_trail import get_default_trail
+                trail = get_default_trail()
+                results.append(trail is not None)
+            except Exception:
+                results.append(False)
+
+        elif cap == "check_file_integrity":
+            # Check if critical files exist to monitor
+            critical = ["/etc/passwd", "/etc/shadow", "/etc/group", "/etc/sudoers"]
+            found = any(os.path.isfile(p) for p in critical)
+            results.append(found)
+
+        elif cap == "check_suspicious_processes":
+            # Check if psutil is available for process monitoring
+            try:
+                import psutil
+                psutil.process_iter()
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        elif cap in ("monitor_network_connections", "check_listening_ports"):
+            # Check if psutil network monitoring is available
+            try:
+                import psutil
+                psutil.net_connections(kind='inet')
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        elif cap == "generate_security_report":
+            # This is a composite capability; mark as available if the module loads
+            results.append(True)
+
+        elif cap == "sbom_generation":
+            try:
+                from importlib.metadata import distributions
+                list(distributions())[:1]
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        elif cap == "stig_checker":
+            try:
+                from hids_mcp.compliance.stig_checker import get_stig_summary
+                results.append(True)
+            except Exception:
+                results.append(False)
+
+        else:
+            # Unknown capability - cannot assess
+            return ImplementationStatus.NOT_ASSESSED
+
+    if not results:
+        return ImplementationStatus.NOT_ASSESSED
+
+    if all(results):
+        return ImplementationStatus.IMPLEMENTED
+    elif any(results):
+        return ImplementationStatus.PARTIALLY_IMPLEMENTED
+    else:
+        return ImplementationStatus.NOT_ASSESSED
+
+
+def _assess_control_dynamically(mapping: ControlMapping) -> ImplementationStatus:
+    """
+    Determine the actual implementation status of a control by checking
+    whether the underlying HIDS capability is available and functional
+    on this system.
+
+    The static mapping status serves as the *maximum* possible status.
+    Dynamic checking can only downgrade it (e.g., if auth logs are missing,
+    an IMPLEMENTED control becomes NOT_ASSESSED).
+
+    Args:
+        mapping: The control mapping to assess.
+
+    Returns:
+        Dynamically determined ImplementationStatus.
+    """
+    static_status = mapping.implementation_status
+
+    # NOT_APPLICABLE stays as-is regardless of system state
+    if static_status == ImplementationStatus.NOT_APPLICABLE:
+        return ImplementationStatus.NOT_APPLICABLE
+
+    # PLANNED stays as-is - not expected to be verifiable yet
+    if static_status == ImplementationStatus.PLANNED:
+        return ImplementationStatus.PLANNED
+
+    dynamic_status = _check_capability_available(mapping.hids_capability)
+
+    # Dynamic check can only downgrade, never upgrade
+    status_rank = {
+        ImplementationStatus.IMPLEMENTED: 4,
+        ImplementationStatus.PARTIALLY_IMPLEMENTED: 3,
+        ImplementationStatus.PLANNED: 2,
+        ImplementationStatus.NOT_ASSESSED: 1,
+        ImplementationStatus.NOT_APPLICABLE: 0,
+    }
+
+    if status_rank.get(dynamic_status, 0) < status_rank.get(static_status, 0):
+        return dynamic_status
+
+    return static_status
+
+
 def get_control_by_id(control_id: str) -> Optional[ControlMapping]:
     """
     Retrieve a specific NIST 800-53 control mapping by ID.
@@ -574,14 +712,20 @@ def get_compliance_report() -> dict:
     """
     report_time = datetime.now(timezone.utc).isoformat()
 
-    # Calculate implementation statistics
-    total_controls = len(CONTROL_MAPPINGS)
-    implemented = [m for m in CONTROL_MAPPINGS if m.implementation_status == ImplementationStatus.IMPLEMENTED]
-    partial = [m for m in CONTROL_MAPPINGS if m.implementation_status == ImplementationStatus.PARTIALLY_IMPLEMENTED]
-    planned = [m for m in CONTROL_MAPPINGS if m.implementation_status == ImplementationStatus.PLANNED]
-    not_applicable = [m for m in CONTROL_MAPPINGS if m.implementation_status == ImplementationStatus.NOT_APPLICABLE]
+    # Dynamically assess each control against actual system state
+    assessed_statuses: dict[str, ImplementationStatus] = {}
+    for m in CONTROL_MAPPINGS:
+        assessed_statuses[m.control_id] = _assess_control_dynamically(m)
 
-    # Weighted compliance: implemented = 1.0, partial = 0.5, planned = 0.0
+    # Calculate implementation statistics from dynamic assessment
+    total_controls = len(CONTROL_MAPPINGS)
+    implemented = [m for m in CONTROL_MAPPINGS if assessed_statuses[m.control_id] == ImplementationStatus.IMPLEMENTED]
+    partial = [m for m in CONTROL_MAPPINGS if assessed_statuses[m.control_id] == ImplementationStatus.PARTIALLY_IMPLEMENTED]
+    planned = [m for m in CONTROL_MAPPINGS if assessed_statuses[m.control_id] == ImplementationStatus.PLANNED]
+    not_applicable = [m for m in CONTROL_MAPPINGS if assessed_statuses[m.control_id] == ImplementationStatus.NOT_APPLICABLE]
+    not_assessed = [m for m in CONTROL_MAPPINGS if assessed_statuses[m.control_id] == ImplementationStatus.NOT_ASSESSED]
+
+    # Weighted compliance: implemented = 1.0, partial = 0.5, not_assessed/planned = 0.0
     applicable_controls = total_controls - len(not_applicable)
     if applicable_controls > 0:
         compliance_score = (len(implemented) + 0.5 * len(partial)) / applicable_controls
@@ -591,21 +735,30 @@ def get_compliance_report() -> dict:
     # Per-family breakdown
     family_breakdown = {}
     for family_code, mappings in _FAMILY_INDEX.items():
-        family_impl = [m for m in mappings if m.implementation_status == ImplementationStatus.IMPLEMENTED]
-        family_partial = [m for m in mappings if m.implementation_status == ImplementationStatus.PARTIALLY_IMPLEMENTED]
+        family_impl = [m for m in mappings if assessed_statuses[m.control_id] == ImplementationStatus.IMPLEMENTED]
+        family_partial = [m for m in mappings if assessed_statuses[m.control_id] == ImplementationStatus.PARTIALLY_IMPLEMENTED]
+        family_not_assessed = [m for m in mappings if assessed_statuses[m.control_id] == ImplementationStatus.NOT_ASSESSED]
         family_total = len(mappings)
+
+        # Build control dicts with dynamic status override
+        control_dicts = []
+        for m in mappings:
+            d = m.to_dict()
+            d["assessed_status"] = assessed_statuses[m.control_id].value
+            control_dicts.append(d)
 
         family_breakdown[family_code] = {
             "family_name": ControlFamily[family_code].value,
             "total_controls": family_total,
             "implemented": len(family_impl),
             "partially_implemented": len(family_partial),
+            "not_assessed": len(family_not_assessed),
             "compliance_percentage": round(
                 ((len(family_impl) + 0.5 * len(family_partial)) / family_total * 100)
                 if family_total > 0 else 0.0,
                 1,
             ),
-            "controls": [m.to_dict() for m in mappings],
+            "controls": control_dicts,
         }
 
     # Enhancement coverage
@@ -638,6 +791,8 @@ def get_compliance_report() -> dict:
             "partially_implemented": len(partial),
             "planned": len(planned),
             "not_applicable": len(not_applicable),
+            "not_assessed": len(not_assessed),
+            "dynamically_verified": True,
         },
         "family_breakdown": family_breakdown,
         "enhancement_coverage": {
@@ -668,6 +823,16 @@ def get_compliance_report() -> dict:
                     "hids_capability": m.hids_capability,
                 }
                 for m in planned
+            ],
+            "not_assessed_controls": [
+                {
+                    "control_id": m.control_id,
+                    "control_name": m.control_name,
+                    "reason": "Capability could not be dynamically verified on this system",
+                    "hids_capability": m.hids_capability,
+                    "static_status": m.implementation_status.value,
+                }
+                for m in not_assessed
             ],
         },
     }
