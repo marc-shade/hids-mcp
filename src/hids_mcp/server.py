@@ -3,11 +3,20 @@
 Host-based IDS MCP Server
 
 Host-based Intrusion Detection System for monitoring local system security.
-Analyzes logs, processes, network connections, and file integrity.
+Analyzes logs, processes, network connections, file integrity, and compliance
+with federal security frameworks (NIST SP 800-53, CMMC, DISA STIG).
+
+Compliance capabilities:
+- NIST SP 800-53 Rev 5 control mapping and posture reporting
+- CMMC Level 2 practice assessment
+- DISA STIG automated compliance checking
+- FedRAMP-ready tamper-evident audit trail (CEF/LEEF export)
+- CycloneDX SBOM generation for supply chain security
 """
 
 import hashlib
 import json
+import logging
 import os
 import re
 import socket
@@ -18,6 +27,26 @@ from typing import Optional
 
 import psutil
 from mcp.server.fastmcp import FastMCP
+
+from hids_mcp.compliance.nist_800_53 import (
+    get_compliance_report,
+    map_alert_to_controls,
+)
+from hids_mcp.compliance.cmmc import assess_cmmc_posture
+from hids_mcp.compliance.stig_checker import get_stig_summary
+from hids_mcp.compliance.audit_trail import (
+    AuditTrail,
+    AuditEvent,
+    EventType,
+    EventSeverity,
+    EventOutcome,
+    export_to_cef,
+    export_to_leef,
+    get_default_trail,
+)
+from hids_mcp.compliance.sbom import generate_sbom_json
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("hids")
 
@@ -681,6 +710,317 @@ async def generate_security_report() -> str:
     }
 
     return json.dumps(report, indent=2)
+
+
+# =============================================================================
+# Compliance & Defense Standards Tools
+# =============================================================================
+
+
+@mcp.tool()
+async def hids_compliance_report() -> str:
+    """
+    Generate NIST SP 800-53 Rev 5 compliance posture report.
+
+    Maps all HIDS capabilities to specific NIST 800-53 controls across
+    families: AU (Audit), SI (System Integrity), IR (Incident Response),
+    CM (Configuration Management), AC (Access Control), SC (System/Comms
+    Protection), SA (System Acquisition), RA (Risk Assessment).
+
+    Returns:
+        JSON with compliance posture including:
+        - Overall compliance score and rating
+        - Per-family breakdown with control details
+        - Enhancement coverage inventory
+        - Assessment readiness metrics
+        - Gap analysis for partially implemented controls
+    """
+    try:
+        report = get_compliance_report()
+
+        # Record compliance assessment in audit trail
+        trail = get_default_trail()
+        trail.record(AuditEvent(
+            event_type=EventType.COMPLIANCE_CHECK,
+            severity=EventSeverity.INFO,
+            action="nist_800_53_compliance_report",
+            outcome=EventOutcome.SUCCESS,
+            description=f"NIST 800-53 compliance report generated: score={report['overall_posture']['compliance_score']}%",
+            nist_controls=["AU-6", "CM-6"],
+            cmmc_practices=["AU.L2-3.3.5"],
+        ))
+
+        return json.dumps(report, indent=2)
+    except Exception as e:
+        logger.error("Failed to generate NIST compliance report: %s", str(e))
+        return json.dumps({
+            "success": False,
+            "error": f"Compliance report generation failed: {str(e)}"
+        })
+
+
+@mcp.tool()
+async def hids_cmmc_assessment() -> str:
+    """
+    Run CMMC Level 2 compliance assessment.
+
+    Evaluates all HIDS capabilities against CMMC Level 2 practices
+    aligned with NIST SP 800-171 Rev 2 requirements for protecting
+    Controlled Unclassified Information (CUI).
+
+    Covers domains: AC (Access Control), AU (Audit & Accountability),
+    CM (Configuration Management), IR (Incident Response),
+    RA (Risk Assessment), SC (System & Communications Protection),
+    SI (System & Information Integrity).
+
+    Returns:
+        JSON with CMMC assessment including:
+        - Overall Level 2 readiness score and rating
+        - Per-domain practice breakdown
+        - NIST 800-171 cross-reference mapping
+        - Evidence artifact inventory
+        - Gap analysis with remediation guidance
+        - Assessment recommendation
+    """
+    try:
+        assessment = assess_cmmc_posture()
+
+        trail = get_default_trail()
+        trail.record(AuditEvent(
+            event_type=EventType.COMPLIANCE_CHECK,
+            severity=EventSeverity.INFO,
+            action="cmmc_level2_assessment",
+            outcome=EventOutcome.SUCCESS,
+            description=f"CMMC Level 2 assessment completed: score={assessment['overall_posture']['readiness_score']}%",
+            nist_controls=["CM-6", "SA-11"],
+            cmmc_practices=["AU.L2-3.3.5", "CM.L2-3.4.1"],
+        ))
+
+        return json.dumps(assessment, indent=2)
+    except Exception as e:
+        logger.error("Failed to generate CMMC assessment: %s", str(e))
+        return json.dumps({
+            "success": False,
+            "error": f"CMMC assessment failed: {str(e)}"
+        })
+
+
+@mcp.tool()
+async def hids_stig_check(stig_id: Optional[str] = None) -> str:
+    """
+    Run DISA STIG compliance checks.
+
+    Executes automated compliance checks against Security Technical
+    Implementation Guide requirements relevant to host-based intrusion
+    detection. Checks cover file integrity monitoring, audit log protection,
+    login attempt monitoring, privilege escalation detection, password
+    complexity, SSH configuration, and audit service status.
+
+    Each finding includes: STIG ID, severity (CAT I/II/III),
+    status (PASS/FAIL/NOT_APPLICABLE), finding details, CCI references,
+    NIST control mappings, and specific remediation guidance.
+
+    Args:
+        stig_id: Optional specific STIG ID to check (e.g., 'V-230264').
+                If not provided, runs all available checks.
+
+    Returns:
+        JSON with STIG compliance results including severity breakdown,
+        per-check findings, and prioritized remediation plan.
+    """
+    try:
+        if stig_id:
+            from hids_mcp.compliance.stig_checker import run_single_stig_check
+            finding = run_single_stig_check(stig_id)
+            if finding is None:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Unknown STIG ID: {stig_id}",
+                    "available_checks": list(
+                        __import__(
+                            'hids_mcp.compliance.stig_checker',
+                            fromlist=['STIG_CHECKS']
+                        ).STIG_CHECKS.keys()
+                    ),
+                })
+            result = finding.to_dict()
+            result["success"] = True
+        else:
+            result = get_stig_summary()
+            result["success"] = True
+
+        trail = get_default_trail()
+        trail.record(AuditEvent(
+            event_type=EventType.COMPLIANCE_CHECK,
+            severity=EventSeverity.INFO,
+            action="stig_compliance_check",
+            outcome=EventOutcome.SUCCESS,
+            description=f"STIG check executed: {'single=' + stig_id if stig_id else 'full scan'}",
+            nist_controls=["CM-6", "SI-7", "AU-9"],
+            cmmc_practices=["CM.L2-3.4.1", "SI.L2-3.14.6"],
+        ))
+
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("Failed to run STIG checks: %s", str(e))
+        return json.dumps({
+            "success": False,
+            "error": f"STIG check failed: {str(e)}"
+        })
+
+
+@mcp.tool()
+async def hids_audit_export(
+    format: str = "cef",
+    event_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 100,
+) -> str:
+    """
+    Export audit trail in SIEM-compatible formats.
+
+    Exports the tamper-evident audit trail in industry-standard formats
+    for Security Information and Event Management (SIEM) integration.
+
+    Supported formats:
+    - CEF (Common Event Format): For ArcSight and generic SIEM platforms
+    - LEEF (Log Event Extended Format): For IBM QRadar
+
+    Each exported event includes: timestamp, event type, severity, source IP,
+    user identity, action, outcome, NIST control references, CMMC practice
+    references, SHA-256 evidence hash, and sequence number.
+
+    Args:
+        format: Export format - 'cef' or 'leef' (default: 'cef')
+        event_type: Filter by event type (authentication, file_integrity,
+                   process_monitoring, network_monitoring, compliance_check,
+                   configuration_change, incident, system_event, audit_system)
+        severity: Minimum severity filter (critical, high, medium, low, informational)
+        since: ISO 8601 timestamp - export events after this time
+        limit: Maximum events to export (default: 100)
+
+    Returns:
+        SIEM-formatted audit events or JSON with integrity verification
+    """
+    try:
+        trail = get_default_trail()
+
+        # Build filters
+        type_filter = None
+        if event_type:
+            try:
+                type_filter = EventType(event_type)
+            except ValueError:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Invalid event_type: {event_type}",
+                    "valid_types": [t.value for t in EventType],
+                })
+
+        severity_filter = None
+        if severity:
+            try:
+                severity_filter = EventSeverity(severity)
+            except ValueError:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Invalid severity: {severity}",
+                    "valid_severities": [s.value for s in EventSeverity],
+                })
+
+        events = trail.get_events(
+            event_type=type_filter,
+            severity=severity_filter,
+            since=since,
+            limit=limit,
+        )
+
+        if format.lower() == "cef":
+            exported = export_to_cef(events)
+        elif format.lower() == "leef":
+            exported = export_to_leef(events)
+        elif format.lower() == "json":
+            exported = json.dumps([e.to_dict() for e in events], indent=2)
+        else:
+            return json.dumps({
+                "success": False,
+                "error": f"Unsupported format: {format}",
+                "supported_formats": ["cef", "leef", "json"],
+            })
+
+        # Also verify chain integrity
+        integrity = trail.verify_integrity()
+
+        return json.dumps({
+            "success": True,
+            "format": format.lower(),
+            "events_exported": len(events),
+            "chain_integrity": integrity,
+            "exported_data": exported,
+        }, indent=2)
+    except Exception as e:
+        logger.error("Failed to export audit trail: %s", str(e))
+        return json.dumps({
+            "success": False,
+            "error": f"Audit export failed: {str(e)}"
+        })
+
+
+@mcp.tool()
+async def hids_generate_sbom(include_transitive: bool = True) -> str:
+    """
+    Generate CycloneDX Software Bill of Materials (SBOM).
+
+    Produces a CycloneDX 1.5 format SBOM documenting all software
+    components in the HIDS-MCP installation. Critical for supply chain
+    security per Executive Order 14028 and NIST SP 800-53 CM-8.
+
+    The SBOM includes:
+    - Component name, version, and description
+    - SPDX license identifiers
+    - Supplier information
+    - SHA-256 component hashes
+    - Package URLs (purl) for universal identification
+    - Dependency graph
+
+    Args:
+        include_transitive: Include transitive (indirect) dependencies
+                          in addition to direct dependencies (default: True)
+
+    Returns:
+        JSON with CycloneDX 1.5 SBOM including component inventory,
+        dependency graph, and metadata
+    """
+    try:
+        sbom_json = generate_sbom_json(include_transitive=include_transitive)
+
+        trail = get_default_trail()
+        sbom_data = json.loads(sbom_json)
+        component_count = len(sbom_data.get("components", []))
+
+        trail.record(AuditEvent(
+            event_type=EventType.COMPLIANCE_CHECK,
+            severity=EventSeverity.INFO,
+            action="sbom_generation",
+            outcome=EventOutcome.SUCCESS,
+            description=f"CycloneDX SBOM generated: {component_count} components",
+            nist_controls=["CM-8", "SA-11"],
+            cmmc_practices=["CM.L2-3.4.1"],
+        ))
+
+        return json.dumps({
+            "success": True,
+            "format": "CycloneDX 1.5",
+            "component_count": component_count,
+            "sbom": sbom_data,
+        }, indent=2)
+    except Exception as e:
+        logger.error("Failed to generate SBOM: %s", str(e))
+        return json.dumps({
+            "success": False,
+            "error": f"SBOM generation failed: {str(e)}"
+        })
 
 
 def main():
