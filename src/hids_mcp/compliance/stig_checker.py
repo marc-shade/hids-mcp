@@ -25,11 +25,9 @@ import os
 import platform
 import pwd
 import re
-import stat
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)

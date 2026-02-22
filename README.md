@@ -25,8 +25,8 @@ Host-based Intrusion Detection System for monitoring local system security with 
 - **Listening Port Audit**: Identify unauthorized listening services
 
 ### Compliance & Defense Standards
-- **NIST SP 800-53 Rev 5**: 18 controls mapped across 8 families (AU, SI, IR, CM, AC, SC, SA, RA) with evidence generation and assessment procedures
-- **CMMC Level 2**: 22 practices mapped across 7 domains aligned with NIST SP 800-171 Rev 2 for CUI protection
+- **NIST SP 800-53 Rev 5**: 22 controls mapped across 8 families (AU, SI, IR, CM, AC, SC, SA, RA) with dynamic verification, evidence generation, and assessment procedures
+- **CMMC Level 2**: 23 practices mapped across 7 domains aligned with NIST SP 800-171 Rev 2 for CUI protection
 - **DISA STIG**: 11 automated compliance checks (V-230264 through V-230478) covering file integrity, audit log protection, login monitoring, privilege escalation, SSH hardening, and password complexity
 - **FedRAMP-Ready Audit Trail**: Tamper-evident logging with SHA-256 hash chaining, CEF/LEEF SIEM export, and retention policy enforcement
 - **Supply Chain Security (SBOM)**: CycloneDX 1.5 Software Bill of Materials generation per Executive Order 14028
@@ -59,7 +59,7 @@ Host-based Intrusion Detection System for monitoring local system security with 
 
 ### NIST SP 800-53 Rev 5 Control Mapping
 
-The HIDS maps to 18 controls across 8 control families:
+The HIDS maps to 22 controls across 8 control families:
 
 | Family | Controls | Coverage |
 |--------|----------|----------|
@@ -76,7 +76,7 @@ Each mapping includes: control ID, description, HIDS capability, how the control
 
 ### CMMC Level 2 Practice Alignment
 
-22 practices mapped across 7 domains aligned with NIST SP 800-171 Rev 2:
+23 practices mapped across 7 domains aligned with NIST SP 800-171 Rev 2:
 
 | Domain | Practices | Key Areas |
 |--------|-----------|-----------|
@@ -86,7 +86,7 @@ Each mapping includes: control ID, description, HIDS capability, how the control
 | **IR** - Incident Response | 2 | Handling, reporting |
 | **RA** - Risk Assessment | 2 | Vulnerability scanning, remediation |
 | **SC** - System & Comms Protection | 2 | Boundary protection, default-deny |
-| **SI** - System & Info Integrity | 4 | Flaw remediation, malware protection, alerts, monitoring |
+| **SI** - System & Info Integrity | 5 | Flaw remediation, malware protection, alerts, monitoring, unauthorized activity detection |
 
 Assessment produces: readiness score, per-domain breakdown, NIST 800-171 cross-references, evidence artifact inventory, and gap analysis with remediation guidance.
 
@@ -149,7 +149,6 @@ The HIDS supports Zero Trust principles through:
 - `/var/log/auth.log` (Debian/Ubuntu)
 - `/var/log/secure` (RHEL/Fedora)
 - `/var/log/messages`
-- `/var/log/syslog`
 
 ## Suspicious Process Indicators
 
@@ -158,7 +157,7 @@ The HIDS supports Zero Trust principles through:
 - Processes with deleted executables
 - Known malware process names (xmrig, mimikatz, hydra, etc.)
 - Reverse shell indicators (nc, ncat, socat)
-- Unusual parent-child relationships
+- Suspicious shell command execution patterns
 
 ## Installation
 

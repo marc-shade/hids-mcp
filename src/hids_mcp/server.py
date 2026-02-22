@@ -30,12 +30,10 @@ from mcp.server.fastmcp import FastMCP
 
 from hids_mcp.compliance.nist_800_53 import (
     get_compliance_report,
-    map_alert_to_controls,
 )
 from hids_mcp.compliance.cmmc import assess_cmmc_posture
 from hids_mcp.compliance.stig_checker import get_stig_summary
 from hids_mcp.compliance.audit_trail import (
-    AuditTrail,
     AuditEvent,
     EventType,
     EventSeverity,
@@ -170,6 +168,11 @@ async def analyze_auth_logs(
                 try:
                     parts = line.split()
                     if len(parts) < 5:
+                        continue
+
+                    # Apply time-window filter when possible
+                    line_ts = _parse_syslog_timestamp(line)
+                    if line_ts is not None and line_ts < cutoff:
                         continue
 
                     # Failed password
@@ -746,6 +749,24 @@ async def generate_security_report() -> str:
         "high": len(high_alerts),
         "medium": len(medium_alerts)
     }
+
+    # Record the security report generation in the audit trail
+    try:
+        trail = get_default_trail()
+        trail.record(AuditEvent(
+            event_type=EventType.SYSTEM_EVENT,
+            severity=EventSeverity.HIGH if high_alerts else EventSeverity.MEDIUM if medium_alerts else EventSeverity.INFO,
+            action="generate_security_report",
+            outcome=EventOutcome.SUCCESS,
+            description=(
+                f"Security report generated: risk={report['overall_risk']}, "
+                f"alerts={len(report['alerts'])} (high={len(high_alerts)}, medium={len(medium_alerts)})"
+            ),
+            nist_controls=["AU-6", "SI-4", "IR-5"],
+            cmmc_practices=["AU.L2-3.3.5", "SI.L2-3.14.6"],
+        ))
+    except Exception:
+        logger.debug("Failed to record security report audit event")
 
     return json.dumps(report, indent=2)
 
