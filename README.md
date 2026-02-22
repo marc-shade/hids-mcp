@@ -1,3 +1,5 @@
+![hids_mcp_compliance](https://github.com/user-attachments/assets/44f9d28c-322c-4c74-822b-af16ec32d1bb)
+
 # Host-based IDS MCP Server
 
 [![MCP](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
