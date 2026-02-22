@@ -22,8 +22,7 @@ Host-based Intrusion Detection System for monitoring local system security with 
 - **Process Monitoring**: Suspicious processes, unusual activity patterns
 - **File Integrity**: Detect unauthorized changes to critical files via SHA-256 hashing
 - **Network Connections**: Monitor active connections, detect C2 backdoors
-- **Port Scan Detection**: Identify reconnaissance activity and unauthorized services
-- **User Activity**: Login patterns, privilege usage, sudo command tracking
+- **Listening Port Audit**: Identify unauthorized listening services
 
 ### Compliance & Defense Standards
 - **NIST SP 800-53 Rev 5**: 18 controls mapped across 8 families (AU, SI, IR, CM, AC, SC, SA, RA) with evidence generation and assessment procedures
